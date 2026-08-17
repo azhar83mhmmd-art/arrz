@@ -255,20 +255,41 @@ const KENARRZ = (function () {
 
     if (!featuredContainer && !categoryContainer) return; // bukan homepage
 
-    if (featuredContainer) {
-      featuredContainer.innerHTML = skeletonCards(4);
-      try {
-        const { data, error } = await supabaseClient
-          .from('accounts')
-          .select('*, account_images(id, image_url, is_primary), categories(name)')
-          // Akun RESERVED (sedang checkout, belum dikonfirmasi admin) tetap
-          // ditampilkan — jangan langsung disembunyikan sebelum admin approve.
-          .in('status', ['AVAILABLE', 'RESERVED'])
-          .eq('featured', true)
-          .order('created_at', { ascending: false })
-          .limit(8);
-        if (error) throw error;
+    if (featuredContainer) featuredContainer.innerHTML = skeletonCards(4);
 
+    // Tiga query independen (featured accounts, total tersedia, kategori)
+    // dijalankan PARALEL lewat Promise.all, bukan berurutan — memangkas
+    // waktu tunggu total dari (t1+t2+t3) jadi ~max(t1,t2,t3).
+    const [featuredResult, statResult, categoryResult] = await Promise.allSettled([
+      featuredContainer
+        ? supabaseClient
+            .from('accounts')
+            .select('*, account_images(id, image_url, is_primary), categories(name)')
+            // Akun RESERVED (sedang checkout, belum dikonfirmasi admin) tetap
+            // ditampilkan — jangan langsung disembunyikan sebelum admin approve.
+            .in('status', ['AVAILABLE', 'RESERVED'])
+            .eq('featured', true)
+            .order('created_at', { ascending: false })
+            .limit(8)
+        : Promise.resolve(null),
+      statTotal
+        ? supabaseClient.from('accounts').select('id', { count: 'exact', head: true }).eq('status', 'AVAILABLE')
+        : Promise.resolve(null),
+      categoryContainer
+        ? supabaseClient.from('categories').select('*').order('name', { ascending: true })
+        : Promise.resolve(null),
+    ]);
+
+    if (featuredContainer) {
+      const res = featuredResult.status === 'fulfilled' ? featuredResult.value : null;
+      if (!res || res.error) {
+        featuredContainer.innerHTML = `
+          <div class="empty-state" style="grid-column: 1/-1;">
+            <h3>Terjadi Kesalahan</h3>
+            <p>Data belum dapat dimuat. Silakan coba lagi.</p>
+          </div>`;
+      } else {
+        const data = res.data;
         if (!data || data.length === 0) {
           featuredContainer.innerHTML = `
             <div class="empty-state" style="grid-column: 1/-1;">
@@ -279,25 +300,18 @@ const KENARRZ = (function () {
           featuredContainer.innerHTML = data.map(renderAccountCard).join('');
         }
         if (statTotal) {
-          const { count } = await supabaseClient
-            .from('accounts')
-            .select('id', { count: 'exact', head: true })
-            .eq('status', 'AVAILABLE');
-          statTotal.textContent = count ?? data.length;
+          const statRes = statResult.status === 'fulfilled' ? statResult.value : null;
+          statTotal.textContent = statRes && !statRes.error ? statRes.count ?? data.length : data.length;
         }
-      } catch (e) {
-        featuredContainer.innerHTML = `
-          <div class="empty-state" style="grid-column: 1/-1;">
-            <h3>Terjadi Kesalahan</h3>
-            <p>Data belum dapat dimuat. Silakan coba lagi.</p>
-          </div>`;
       }
     }
 
     if (categoryContainer) {
-      try {
-        const { data, error } = await supabaseClient.from('categories').select('*').order('name', { ascending: true });
-        if (error) throw error;
+      const res = categoryResult.status === 'fulfilled' ? categoryResult.value : null;
+      if (!res || res.error) {
+        categoryContainer.innerHTML = '';
+      } else {
+        const data = res.data;
         if (statCategory) statCategory.textContent = data?.length ?? 0;
         categoryContainer.innerHTML = (data || [])
           .map(
@@ -308,8 +322,6 @@ const KENARRZ = (function () {
             </a>`
           )
           .join('');
-      } catch (e) {
-        categoryContainer.innerHTML = '';
       }
     }
 
